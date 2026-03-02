@@ -71,7 +71,7 @@ def print_critical_alert(findings):
         return
     
     print(f"\n{BG_RED}{RED}{'='*60}{RESET}")
-    print(f"{BG_RED}{RED}  🚨 CRITICAL VULNERABILITIES DETECTED! 🚨{RESET}")
+    print(f"{BG_RED}{RED}  [!] CRITICAL VULNERABILITIES DETECTED [!]{RESET}")
     print(f"{BG_RED}{RED}{'='*60}{RESET}\n")
     
     for finding in findings:
@@ -86,14 +86,14 @@ def write_critical_markdown(file_handle, findings, section_context=""):
         return
     
     file_handle.write("\n> [!CAUTION]\n")
-    file_handle.write("> ## <span style=\"color:red\">🚨 VULNERABILITIES DETECTED!</span>\n>\n")
+    file_handle.write("> ## <span style=\"color:red\">[!] VULNERABILITIES DETECTED</span>\n>\n")
     
     for finding in findings:
-        severity_emoji = "🔴" if finding["severity"] == "CRITICAL" else "🟡" if finding["severity"] == "HIGH" else "🔵"
+        severity_emoji = "[C]" if finding["severity"] == "CRITICAL" else "[H]" if finding["severity"] == "HIGH" else "[I]"
         file_handle.write(f"> {severity_emoji} <span style=\"color:red; font-weight:bold\">[{finding['severity']}]</span> {finding['description']}\n")
     
     file_handle.write(">\n")
-    file_handle.write("> **⚡ RECOMMENDED ACTION:** Exploit immediately!\n\n")
+    file_handle.write("> **[>] RECOMMENDED ACTION:** Exploit immediately!\n\n")
 
 def run_cmd(cmd_str, file_handle, section_title=None, check_critical=True):
     """Execute command, print to terminal and write to file in real time.
@@ -488,14 +488,14 @@ def main():
 def write_final_summary(file_handle, findings):
     """Write a final summary of all critical findings to the markdown report."""
     if not findings:
-        file_handle.write("## 🎯 FINAL SUMMARY - VULNERABILITIES\n\n")
-        file_handle.write("> ✅ **No critical vulnerabilities automatically detected.**\n\n")
-        file_handle.write("> ⚠️ This does not mean the domain is secure. Review results manually.\n\n")
+        file_handle.write("## FINAL SUMMARY - VULNERABILITIES\n\n")
+        file_handle.write("> [+] **No critical vulnerabilities automatically detected.**\n\n")
+        file_handle.write("> [!] This does not mean the domain is secure. Review results manually.\n\n")
         return
     
-    file_handle.write("## 🎯 FINAL SUMMARY - VULNERABILITIES DETECTED\n\n")
+    file_handle.write("## FINAL SUMMARY - VULNERABILITIES DETECTED\n\n")
     file_handle.write("> [!CAUTION]\n")
-    file_handle.write('> ## <span style="color:red">🚨 CRITICAL VULNERABILITIES FOUND!</span>\n>\n')
+    file_handle.write('> ## <span style="color:red">[!] CRITICAL VULNERABILITIES FOUND!</span>\n>\n')
     
     # Group by severity
     critical = [f for f in findings if f["severity"] == "CRITICAL"]
@@ -503,26 +503,26 @@ def write_final_summary(file_handle, findings):
     info = [f for f in findings if f["severity"] == "INFO"]
     
     if critical:
-        file_handle.write('> ### <span style="color:red">🔴 CRITICAL (Immediate Exploitation Possible)</span>\n>\n')
+        file_handle.write('> ### <span style="color:red">[CRITICAL] Immediate Exploitation Possible</span>\n>\n')
         for f in critical:
             file_handle.write(f'> - <span style="color:red; font-weight:bold">**{f["description"]}**</span> (Section: {f["section"]})\n')
         file_handle.write(">\n")
     
     if high:
-        file_handle.write('> ### <span style="color:orange">🟡 HIGH (Requires Investigation)</span>\n>\n')
+        file_handle.write('> ### <span style="color:orange">[HIGH] Requires Investigation</span>\n>\n')
         for f in high:
             file_handle.write(f'> - **{f["description"]}** (Section: {f["section"]})\n')
         file_handle.write(">\n")
     
     if info:
-        file_handle.write("> ### 🔵 INFORMATIONAL\n>\n")
+        file_handle.write("> ### [INFO] Informational\n>\n")
         for f in info:
             file_handle.write(f'> - {f["description"]} (Section: {f["section"]})\n')
         file_handle.write(">\n")
     
     # Add recommended next steps
     file_handle.write("> ---\n>\n")
-    file_handle.write("> ### ⚡ RECOMMENDED NEXT STEPS:\n>\n")
+    file_handle.write("> ### [>] RECOMMENDED NEXT STEPS:\n>\n")
     
     recommendations = []
     for f in findings:
@@ -553,23 +553,23 @@ def print_final_summary(findings):
         return
     
     print(f"\n{BG_RED}{'='*70}{RESET}")
-    print(f"{BG_RED}  🎯 FINAL SUMMARY - {len(findings)} VULNERABILITY(IES) DETECTED  {RESET}")
+    print(f"{BG_RED}  FINAL SUMMARY - {len(findings)} VULNERABILITY(IES) DETECTED  {RESET}")
     print(f"{BG_RED}{'='*70}{RESET}\n")
     
     critical_count = len([f for f in findings if f["severity"] == "CRITICAL"])
     high_count = len([f for f in findings if f["severity"] == "HIGH"])
     
     if critical_count:
-        print(f"{RED}🔴 CRITICAL: {critical_count}{RESET}")
+        print(f"{RED}[CRITICAL]: {critical_count}{RESET}")
     if high_count:
-        print(f"{YELLOW}🟡 HIGH: {high_count}{RESET}")
+        print(f"{YELLOW}[HIGH]: {high_count}{RESET}")
     
     print(f"\n{RED}Vulnerabilities found:{RESET}")
     unique_descriptions = list(dict.fromkeys([f["description"] for f in findings]))
     for desc in unique_descriptions:
-        print(f"  {RED}•{RESET} {desc}")
+        print(f"  {RED}*{RESET} {desc}")
     
-    print(f"\n{GREEN}➤ Check the markdown report for details and exploitation commands.{RESET}")
+    print(f"\n{GREEN}[>] Check the markdown report for details and exploitation commands.{RESET}")
 
 if __name__ == "__main__":
     main()
