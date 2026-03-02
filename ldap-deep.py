@@ -3,15 +3,106 @@ import subprocess
 import sys
 import argparse
 import shlex
+import re
 
-def run_cmd(cmd_str, file_handle, section_title=None):
+# ANSI color codes
+RED = "\033[1;31m"
+GREEN = "\033[1;32m"
+YELLOW = "\033[1;33m"
+BLUE = "\033[1;34m"
+MAGENTA = "\033[1;35m"
+CYAN = "\033[1;36m"
+RESET = "\033[0m"
+BG_RED = "\033[41m"
+
+# Critical patterns to detect - (regex_pattern, severity, description)
+CRITICAL_PATTERNS = [
+    # PASSWD_NOTREQD - possible empty password
+    (r"userAccountControl:\s*\d*32\d*|PASSWD_NOTREQD", "CRITICAL", "PASSWD_NOTREQD - Account may have EMPTY password!"),
+    # Kerberoastable users (SPN on user account, not computer)
+    (r"servicePrincipalName:\s*\S+", "CRITICAL", "KERBEROASTABLE - SPN found, can extract hash!"),
+    # AS-REP Roastable (no preauth required - UAC 4194304)
+    (r"userAccountControl:\s*\d*4194304\d*|DONT_REQ_PREAUTH", "CRITICAL", "AS-REP ROASTABLE - No preauth required!"),
+    # Unconstrained Delegation (not DC)
+    (r"TRUSTED_FOR_DELEGATION|userAccountControl:\s*\d*524288", "HIGH", "UNCONSTRAINED DELEGATION detected!"),
+    # Constrained Delegation
+    (r"msDS-AllowedToDelegateTo:\s*\S+", "CRITICAL", "CONSTRAINED DELEGATION - Can impersonate users!"),
+    # RBCD
+    (r"msDS-AllowedToActOnBehalfOfOtherIdentity", "CRITICAL", "RBCD configured - Check permissions!"),
+    # Lockout Threshold = 0 (no lockout)
+    (r"lockoutThreshold:\s*0\s*$", "CRITICAL", "NO LOCKOUT - Unlimited password spray!"),
+    # LAPS password readable
+    (r"ms-MCS-AdmPwd:\s*\S+|msLAPS-Password:\s*\S+", "CRITICAL", "LAPS PASSWORD FOUND!"),
+    # Machine Account Quota > 0
+    (r"ms-DS-MachineAccountQuota:\s*([1-9]\d*)", "HIGH", "MAQ > 0 - Can create computer accounts!"),
+    # Password in description
+    (r"description:.*(?:pass|pwd|senha|password|cred).*", "CRITICAL", "POSSIBLE PASSWORD IN DESCRIPTION!"),
+    # AdminCount=1 on non-default accounts (potential orphaned admins)
+    (r"adminCount:\s*1", "INFO", "Account protected by AdminSDHolder"),
+    # gMSA accounts
+    (r"msDS-GroupMSAMembership|gMSA", "HIGH", "gMSA found - Check who can read password!"),
+    # Weak password policy
+    (r"minPwdLength:\s*([0-7])\s*$", "HIGH", "WEAK MIN PASSWORD (< 8 characters)!"),
+]
+
+def analyze_critical_findings(output, section_title=""):
+    """Analyze output for critical security findings."""
+    findings = []
+    for pattern, severity, description in CRITICAL_PATTERNS:
+        matches = re.findall(pattern, output, re.IGNORECASE | re.MULTILINE)
+        if matches:
+            # Skip krbtgt for Kerberoasting (it's always there but not exploitable)
+            if "servicePrincipalName" in pattern and "krbtgt" in output.lower():
+                # Check if there are OTHER SPNs besides krbtgt
+                spn_lines = re.findall(r"sAMAccountName:\s*(\S+)", output, re.IGNORECASE)
+                if len(spn_lines) <= 1:
+                    continue
+            findings.append({
+                "severity": severity,
+                "description": description,
+                "matches": len(matches) if isinstance(matches[0], str) else len(matches),
+                "section": section_title
+            })
+    return findings
+
+def print_critical_alert(findings):
+    """Print critical findings to terminal with red highlighting."""
+    if not findings:
+        return
+    
+    print(f"\n{BG_RED}{RED}{'='*60}{RESET}")
+    print(f"{BG_RED}{RED}  🚨 CRITICAL VULNERABILITIES DETECTED! 🚨{RESET}")
+    print(f"{BG_RED}{RED}{'='*60}{RESET}\n")
+    
+    for finding in findings:
+        severity_color = RED if finding["severity"] == "CRITICAL" else YELLOW if finding["severity"] == "HIGH" else CYAN
+        print(f"{severity_color}[{finding['severity']}]{RESET} {finding['description']}")
+    
+    print(f"\n{RED}{'='*60}{RESET}\n")
+
+def write_critical_markdown(file_handle, findings, section_context=""):
+    """Write critical findings to markdown with red styling."""
+    if not findings:
+        return
+    
+    file_handle.write("\n> [!CAUTION]\n")
+    file_handle.write("> ## <span style=\"color:red\">🚨 VULNERABILITIES DETECTED!</span>\n>\n")
+    
+    for finding in findings:
+        severity_emoji = "🔴" if finding["severity"] == "CRITICAL" else "🟡" if finding["severity"] == "HIGH" else "🔵"
+        file_handle.write(f"> {severity_emoji} <span style=\"color:red; font-weight:bold\">[{finding['severity']}]</span> {finding['description']}\n")
+    
+    file_handle.write(">\n")
+    file_handle.write("> **⚡ RECOMMENDED ACTION:** Exploit immediately!\n\n")
+
+def run_cmd(cmd_str, file_handle, section_title=None, check_critical=True):
     """Execute command, print to terminal and write to file in real time.
        Returns the full output for error checking."""
     if section_title:
-        print(f"\n\033[1;36m[>] {section_title}\033[0m")
+        print(f"\n{CYAN}[>] {section_title}{RESET}")
         file_handle.write(f"### {section_title}\n\n")
     
-    print(f"\033[1;34m[*] Executing:\033[0m {cmd_str}")
+    print(f"{BLUE}[*] Executing:{RESET} {cmd_str}")
     file_handle.write(f"**Command:** `{cmd_str}`\n\n```bash\n")
     file_handle.flush()
     
@@ -25,11 +116,25 @@ def run_cmd(cmd_str, file_handle, section_title=None):
             full_output += line
         process.wait()
     except Exception as e:
-        print(f"\033[1;31mERROR: {e}\033[0m")
+        print(f"{RED}ERROR: {e}{RESET}")
         file_handle.write(f"ERROR: {e}\n")
         full_output += f"ERROR: {e}"
-    file_handle.write("```\n\n---\n\n")
+    file_handle.write("```\n\n")
+    
+    # Analyze for critical findings
+    findings = []
+    if check_critical:
+        findings = analyze_critical_findings(full_output, section_title)
+        if findings:
+            print_critical_alert(findings)
+            write_critical_markdown(file_handle, findings, section_title)
+            ALL_FINDINGS.extend(findings)
+    
+    file_handle.write("---\n\n")
     return full_output
+
+# Global list to collect all findings
+ALL_FINDINGS = []
 
 def check_ldap_error(output):
     """Check for common LDAP errors and return error message if found."""
@@ -66,11 +171,11 @@ def main():
         hostname_patterns = ["DC", "AD", "SERVER", "SRV", "WIN", "PDC", "BDC", "RODC"]
         if any(first_part.startswith(p) for p in hostname_patterns) or (len(first_part) <= 6 and any(c.isdigit() for c in first_part)):
             suggested_domain = ".".join(domain_parts[1:])
-            print(f"\033[1;33m[!] WARNING: '{args.domain}' looks like a hostname, not a domain.\033[0m")
-            print(f"\033[1;33m[!] Did you mean: -d {suggested_domain}\033[0m")
-            response = input(f"\033[1;33m[?] Continue anyway? (y/N): \033[0m").strip().lower()
+            print(f"{YELLOW}[!] WARNING: '{args.domain}' looks like a hostname, not a domain.{RESET}")
+            print(f"{YELLOW}[!] Did you mean: -d {suggested_domain}{RESET}")
+            response = input(f"{YELLOW}[?] Continue anyway? (y/N): {RESET}").strip().lower()
             if response != 'y':
-                print(f"\033[1;32m[*] Run again with: -d {suggested_domain}\033[0m")
+                print(f"{GREEN}[*] Run again with: -d {suggested_domain}{RESET}")
                 sys.exit(0)
 
     # Prepare shell-safe variables
@@ -93,7 +198,7 @@ def main():
         # Authentication logic (Password vs Hash)
         if args.password:
             safe_pass = shlex.quote(args.password)
-            print("\033[1;32m[+] Password authentication detected. Using ldapsearch...\033[0m")
+            print(f"{GREEN}[+] Password authentication detected. Using ldapsearch...{RESET}")
             f.write("## Authentication: Password-based (ldapsearch)\n\n")
             
             # Try different bind DN formats - UPN format often works better
@@ -104,7 +209,7 @@ def main():
             
             ldap_auth = None
             for bind_dn, format_name in bind_formats:
-                print(f"\033[1;33m[*] Trying {format_name}...\033[0m")
+                print(f"{YELLOW}[*] Trying {format_name}...{RESET}")
                 test_auth = f"-x -H ldap://{safe_target} -D {bind_dn} -w {safe_pass} -b {safe_basedn}"
                 test_cmd = f"ldapsearch {test_auth} -LLL '(objectClass=domain)' dn 2>&1 | head -5"
                 
@@ -112,27 +217,27 @@ def main():
                                         capture_output=True, text=True, timeout=10)
                 
                 if "Invalid credentials" not in result.stdout and "error" not in result.stdout.lower():
-                    print(f"\033[1;32m[+] Success with {format_name}\033[0m")
+                    print(f"{GREEN}[+] Success with {format_name}{RESET}")
                     ldap_auth = test_auth
                     f.write(f"> ✅ Using {format_name}: `{bind_dn}`\n\n")
                     break
                 else:
-                    print(f"\033[1;31m[-] Failed with {format_name}\033[0m")
+                    print(f"{RED}[-] Failed with {format_name}{RESET}")
             
             if not ldap_auth:
-                print(f"\n\033[1;31m[!] FATAL: All authentication methods failed\033[0m")
-                print(f"\033[1;33m[*] Possible causes:\033[0m")
+                print(f"\n{RED}[!] FATAL: All authentication methods failed{RESET}")
+                print(f"{YELLOW}[*] Possible causes:{RESET}")
                 print(f"    - Wrong credentials")
                 print(f"    - LDAP simple bind disabled (try LDAPS or Kerberos)")
                 print(f"    - Channel binding required")
-                print(f"\033[1;33m[*] Alternative: Use NetExec or Impacket tools instead\033[0m")
-                print(f"\033[1;33m[*] Try: nxc ldap {args.target} -u {args.user} -p '<pass>' --users\033[0m")
+                print(f"{YELLOW}[*] Alternative: Use NetExec or Impacket tools instead{RESET}")
+                print(f"{YELLOW}[*] Try: nxc ldap {args.target} -u {args.user} -p '<pass>' --users{RESET}")
                 f.write(f"\n> ❌ **FATAL ERROR:** All LDAP bind methods failed\n\n")
                 f.write(f"> **Alternatives:**\n")
                 f.write(f"> - Use `nxc ldap` for NTLM-based LDAP\n")
                 f.write(f"> - Use `impacket-GetADUsers` with `-hashes` option\n")
                 f.write(f"> - Try LDAPS (port 636) if available\n")
-                print(f"\n\033[1;32m[+] Partial report saved to: {report_name}\033[0m")
+                print(f"\n{GREEN}[+] Partial report saved to: {report_name}{RESET}")
                 sys.exit(1)
             
             # =================================================================
@@ -321,7 +426,7 @@ def main():
             
         elif args.hash:
             safe_hash = shlex.quote(args.hash)
-            print("\033[1;33m[!] Hash authentication detected. Using Impacket (Pass-The-Hash)...\033[0m")
+            print(f"{YELLOW}[!] Hash authentication detected. Using Impacket (Pass-The-Hash)...{RESET}")
             f.write("## Authentication: Hash-based (Impacket PTH)\n\n")
             f.write("> ⚠️ **Note:** `ldapsearch` does not support hashes. Using Impacket tools.\n\n")
             
@@ -338,10 +443,10 @@ def main():
             
             # Check for auth errors
             if "error" in output.lower() and ("credentials" in output.lower() or "logon" in output.lower()):
-                print(f"\n\033[1;31m[!] FATAL: Authentication failed\033[0m")
-                print(f"\033[1;33m[*] Hint: Check domain, username and hash format\033[0m")
+                print(f"\n{RED}[!] FATAL: Authentication failed{RESET}")
+                print(f"{YELLOW}[*] Hint: Check domain, username and hash format{RESET}")
                 f.write(f"\n> ❌ **FATAL ERROR:** Authentication failed\n")
-                print(f"\n\033[1;32m[+] Partial report saved to: {report_name}\033[0m")
+                print(f"\n{GREEN}[+] Partial report saved to: {report_name}{RESET}")
                 sys.exit(1)
             
             # GetUserSPNs (Kerberoasting)
@@ -366,11 +471,105 @@ def main():
         # =================================================================
         if args.bloodhound:
             f.write("## BloodHound Collection\n\n")
-            print("\033[1;35m[*] Starting BloodHound collection...\033[0m")
+            print(f"{MAGENTA}[*] Starting BloodHound collection...{RESET}")
             cmd_bh = f"python3 -m bloodhound -u {safe_user} {auth_string_bh} -ns {safe_target} -d {safe_domain} -c All"
             run_cmd(cmd_bh, f, "BloodHound-Python (All collectors)")
+        
+        # =================================================================
+        # Write Final Summary of Critical Findings
+        # =================================================================
+        write_final_summary(f, ALL_FINDINGS)
 
-    print(f"\n\033[1;32m[+] Full report saved to: {report_name}\033[0m")
+    # Print final summary to terminal
+    print_final_summary(ALL_FINDINGS)
+    print(f"\n{GREEN}[+] Full report saved to: {report_name}{RESET}")
+
+
+def write_final_summary(file_handle, findings):
+    """Write a final summary of all critical findings to the markdown report."""
+    if not findings:
+        file_handle.write("## 🎯 FINAL SUMMARY - VULNERABILITIES\n\n")
+        file_handle.write("> ✅ **No critical vulnerabilities automatically detected.**\n\n")
+        file_handle.write("> ⚠️ This does not mean the domain is secure. Review results manually.\n\n")
+        return
+    
+    file_handle.write("## 🎯 FINAL SUMMARY - VULNERABILITIES DETECTED\n\n")
+    file_handle.write("> [!CAUTION]\n")
+    file_handle.write('> ## <span style="color:red">🚨 CRITICAL VULNERABILITIES FOUND!</span>\n>\n')
+    
+    # Group by severity
+    critical = [f for f in findings if f["severity"] == "CRITICAL"]
+    high = [f for f in findings if f["severity"] == "HIGH"]
+    info = [f for f in findings if f["severity"] == "INFO"]
+    
+    if critical:
+        file_handle.write('> ### <span style="color:red">🔴 CRITICAL (Immediate Exploitation Possible)</span>\n>\n')
+        for f in critical:
+            file_handle.write(f'> - <span style="color:red; font-weight:bold">**{f["description"]}**</span> (Section: {f["section"]})\n')
+        file_handle.write(">\n")
+    
+    if high:
+        file_handle.write('> ### <span style="color:orange">🟡 HIGH (Requires Investigation)</span>\n>\n')
+        for f in high:
+            file_handle.write(f'> - **{f["description"]}** (Section: {f["section"]})\n')
+        file_handle.write(">\n")
+    
+    if info:
+        file_handle.write("> ### 🔵 INFORMATIONAL\n>\n")
+        for f in info:
+            file_handle.write(f'> - {f["description"]} (Section: {f["section"]})\n')
+        file_handle.write(">\n")
+    
+    # Add recommended next steps
+    file_handle.write("> ---\n>\n")
+    file_handle.write("> ### ⚡ RECOMMENDED NEXT STEPS:\n>\n")
+    
+    recommendations = []
+    for f in findings:
+        if "KERBEROAST" in f["description"]:
+            recommendations.append("1. **Kerberoast:** `impacket-GetUserSPNs DOMAIN/user:pass -dc-ip IP -request`")
+        if "AS-REP" in f["description"]:
+            recommendations.append("2. **AS-REP Roast:** `impacket-GetNPUsers DOMAIN/ -dc-ip IP -request`")
+        if "PASSWD_NOTREQD" in f["description"]:
+            recommendations.append("3. **Test empty password:** `crackmapexec smb IP -u 'ACCOUNT$' -p ''`")
+        if "DELEGATION" in f["description"]:
+            recommendations.append("4. **Delegation Attack:** Use S4U2Proxy after obtaining credentials")
+        if "LOCKOUT" in f["description"]:
+            recommendations.append("5. **Password Spray:** `crackmapexec smb IP -u users.txt -p passwords.txt`")
+        if "LAPS" in f["description"]:
+            recommendations.append("6. **Use LAPS:** Local admin password found!")
+    
+    # Deduplicate and write
+    for rec in list(dict.fromkeys(recommendations)):
+        file_handle.write(f"> {rec}\n")
+    
+    file_handle.write("\n---\n\n")
+
+
+def print_final_summary(findings):
+    """Print final summary to terminal."""
+    if not findings:
+        print(f"\n{GREEN}[+] No critical vulnerabilities automatically detected.{RESET}")
+        return
+    
+    print(f"\n{BG_RED}{'='*70}{RESET}")
+    print(f"{BG_RED}  🎯 FINAL SUMMARY - {len(findings)} VULNERABILITY(IES) DETECTED  {RESET}")
+    print(f"{BG_RED}{'='*70}{RESET}\n")
+    
+    critical_count = len([f for f in findings if f["severity"] == "CRITICAL"])
+    high_count = len([f for f in findings if f["severity"] == "HIGH"])
+    
+    if critical_count:
+        print(f"{RED}🔴 CRITICAL: {critical_count}{RESET}")
+    if high_count:
+        print(f"{YELLOW}🟡 HIGH: {high_count}{RESET}")
+    
+    print(f"\n{RED}Vulnerabilities found:{RESET}")
+    unique_descriptions = list(dict.fromkeys([f["description"] for f in findings]))
+    for desc in unique_descriptions:
+        print(f"  {RED}•{RESET} {desc}")
+    
+    print(f"\n{GREEN}➤ Check the markdown report for details and exploitation commands.{RESET}")
 
 if __name__ == "__main__":
     main()
