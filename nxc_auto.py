@@ -200,20 +200,35 @@ def check_responsiveness(output, require_auth):
     if "connection refused" in out_lower or "timeout" in out_lower or "unreachable" in out_lower:
         return False, "Service down or port closed."
     
-    # 2. Check for explicit failures
-    if "[-]" in output and ("logon_failure" in out_lower or "status_logon_failure" in out_lower):
-        return False, "Authentication failed."
-    
-    if "[-]" in output and "access_denied" in out_lower:
-        return False, "Access denied."
+    # 2. Check for explicit failures (even if [+] appears alongside)
+    if "[-]" in output:
+        # Login failures
+        if "logon_failure" in out_lower or "status_logon_failure" in out_lower:
+            return False, "Authentication failed."
+        if "login failed" in out_lower:
+            return False, "Login failed."
+        # Access denied
+        if "access_denied" in out_lower or "status_access_denied" in out_lower:
+            return False, "Access denied."
+        # LDAP bind required (null session doesn't work for queries)
+        if "successful bind must be completed" in out_lower:
+            return False, "LDAP requires authenticated bind."
+        # SpnegoError (WinRM issue with null)
+        if "spnegoerror" in out_lower:
+            return False, "SPNEGO authentication error."
+        # Generic encoded_data error (RDP with null)
+        if "encoded_data must be" in out_lower:
+            return False, "Protocol doesn't support null auth."
 
     # 3. Check for success indicators
     # NetExec uses [+] for login success or Pwn3d! for admin
     if "[+]" in output or "Pwn3d!" in output:
+        # Verify it's a real success, not just "anonymous login" marker
+        # Check if there's actual data or just acknowledgment
         return True, "Authentication successful."
     
     # 4. For null/guest, [*] with target info means service is responsive
-    # Check if we got basic info (indicates service responded)
+    # But only if no errors were present
     if "[*]" in output and ("name:" in out_lower or "domain:" in out_lower):
         return True, "Service responsive."
             
@@ -247,10 +262,10 @@ def main():
     if require_auth:
         auth_modes = [(args.user, args.password, "Authenticated")]
     else:
-        # Try null session first, then guest
+        # Try guest first, then null session as fallback
         auth_modes = [
-            ("", "", "Null Session"),
-            ("guest", "", "Guest")
+            ("guest", "", "Guest"),
+            ("", "", "Null Session")
         ]
     
     with open(report_name, "w") as f:
