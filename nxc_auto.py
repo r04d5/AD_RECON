@@ -255,7 +255,14 @@ def main():
         print("\n[!] ERROR: Target not specified. Example: ./nxc-auto.py 10.10.11.1 -u user -p pass")
         sys.exit(1)
 
-    report_name = f"nxc_report_{target.replace('.', '_')}.md"
+    # Build report filename with optional username
+    target_clean = target.replace('.', '_')
+    if args.user:
+        user_clean = args.user.replace('\\', '_').replace('/', '_').replace(' ', '_')
+        report_name = f"nxc_report_{target_clean}_{user_clean}.md"
+    else:
+        report_name = f"nxc_report_{target_clean}_anon.md"
+    
     require_auth = args.user is not None
     
     # Define auth modes to try when no credentials provided
