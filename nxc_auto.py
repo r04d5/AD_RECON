@@ -10,7 +10,7 @@ ENUM_FLAGS = {
     "smb": ["--shares", "--users", "--groups", "--pass-pol", "--rid-brute"],
     "wmi": [],  # WMI has limited enumeration flags in current NXC
     "winrm": [],  # WinRM groups/sessions moved to other protocols
-    "mssql": ["--databases", "--proxy-info", "-M mssql_priv"],
+    "mssql": [],  # Most MSSQL flags require auth; -M mssql_priv needs valid login
     "ldap": [
         "--trusted-for-delegation", 
         "--password-not-required", 
@@ -138,17 +138,25 @@ def check_responsiveness(output, require_auth):
     # 1. Check if service is down, port is closed or unreachable
     if "connection refused" in out_lower or "timeout" in out_lower or "unreachable" in out_lower:
         return False, "Service down or port closed."
+    
+    # 2. Check for explicit failures
+    if "[-]" in output and ("logon_failure" in out_lower or "status_logon_failure" in out_lower):
+        return False, "Authentication failed."
+    
+    if "[-]" in output and "access_denied" in out_lower:
+        return False, "Access denied."
 
-    # 2. If we're trying with credentials (Auth mode)
-    if require_auth:
-        # NetExec uses [+] for login success or Pwn3d! for admin
-        if "[+]" in output or "Pwn3d!" in output:
-            return True, "Authentication successful."
-        else:
-            return False, "Authentication failed or access denied."
+    # 3. Check for success indicators
+    # NetExec uses [+] for login success or Pwn3d! for admin
+    if "[+]" in output or "Pwn3d!" in output:
+        return True, "Authentication successful."
+    
+    # 4. For null/guest, [*] with target info means service is responsive
+    # Check if we got basic info (indicates service responded)
+    if "[*]" in output and ("name:" in out_lower or "domain:" in out_lower):
+        return True, "Service responsive."
             
-    # 3. Anonymous / Null Session mode
-    return True, "Service responsive for anonymous tests."
+    return False, "No valid response from service."
 
 def main():
     parser = argparse.ArgumentParser(description="NXC Automation - Smart Check & Roasting")
@@ -174,6 +182,16 @@ def main():
     report_name = f"nxc_report_{target.replace('.', '_')}.md"
     require_auth = args.user is not None
     
+    # Define auth modes to try when no credentials provided
+    if require_auth:
+        auth_modes = [(args.user, args.password, "Authenticated")]
+    else:
+        # Try null session first, then guest
+        auth_modes = [
+            ("", "", "Null Session"),
+            ("guest", "", "Guest")
+        ]
+    
     with open(report_name, "w") as f:
         f.write(f"# NXC Smart Report - Target: {target}\n\n")
         
@@ -185,26 +203,37 @@ def main():
             # ---------------------------------------------------------
             # PHASE 1: Base Check (Connectivity and Authentication Test)
             # ---------------------------------------------------------
-            base_cmd = ["nxc", proto, target]
-            if args.user: base_cmd.extend(["-u", args.user])
-            # Using "is not None" to accept empty passwords (e.g., -p '')
-            if args.password is not None: base_cmd.extend(["-p", args.password])
+            working_auth = None
             
-            print(f"\033[1;33m[*] Phase 1: Checking responsiveness and login...\033[0m")
-            output = run_and_stream(base_cmd, f)
+            for auth_user, auth_pass, auth_label in auth_modes:
+                base_cmd = ["nxc", proto, target, "-u", auth_user, "-p", auth_pass]
+                
+                print(f"\033[1;33m[*] Phase 1: Testing {auth_label} access...\033[0m")
+                output = run_and_stream(base_cmd, f)
+                
+                # Response analysis
+                should_continue, reason = check_responsiveness(output, require_auth)
+                
+                if should_continue:
+                    working_auth = (auth_user, auth_pass, auth_label)
+                    print(f"\033[1;32m[+] {auth_label}: {reason}\033[0m")
+                    break
+                else:
+                    print(f"\033[1;31m[!] {auth_label}: {reason}\033[0m")
+                    f.write(f"> ⚠️ **{auth_label}:** {reason}\n\n")
             
-            # Response analysis
-            should_continue, reason = check_responsiveness(output, require_auth)
-            
-            if not should_continue:
-                print(f"\033[1;31m[!] {reason} Skipping deep enumeration of {proto.upper()}.\033[0m")
-                f.write(f"> 🛑 **Warning:** {reason} Advanced flags were skipped.\n\n---\n\n")
+            if not working_auth:
+                print(f"\033[1;31m[!] No working auth method. Skipping deep enumeration of {proto.upper()}.\033[0m")
+                f.write(f"> 🛑 **Warning:** No authentication method worked. Advanced flags were skipped.\n\n---\n\n")
                 continue # Skip to next protocol
+            
+            auth_user, auth_pass, auth_label = working_auth
+            base_cmd = ["nxc", proto, target, "-u", auth_user, "-p", auth_pass]
             
             # ---------------------------------------------------------
             # PHASE 2: Deep Enumeration and Attacks (If Phase 1 passed)
             # ---------------------------------------------------------
-            print(f"\033[1;32m[+] {reason} Starting data extraction...\033[0m")
+            print(f"\033[1;32m[+] Using {auth_label} for data extraction...\033[0m")
             for flag in ENUM_FLAGS[proto]:
                 cmd = base_cmd.copy()
                 cmd.extend(flag.split())

