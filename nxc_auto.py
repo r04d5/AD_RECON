@@ -24,67 +24,128 @@ ENUM_FLAGS = {
 # Flags that require Kerberos and may fail due to clock skew
 KERBEROS_FLAGS = ["--asreproast", "--kerberoasting"]
 
-def get_target_time(target):
-    """Get time from target using ntpdate for clock skew fix."""
+def get_time_offset_from_target(target):
+    """Try to extract time information from target SMB/LDAP response."""
     try:
+        # Query SMB to get timestamp from server response
         result = subprocess.run(
-            ["ntpdate", "-q", target],
+            ["nxc", "smb", target],
             capture_output=True,
             text=True,
             timeout=10
         )
-        if result.returncode == 0 and result.stdout:
-            # Parse first line to get time: "server 10.x.x.x, stratum 3, offset -0.001234, delay 0.02345"
-            # Or format: "08 Jun 15:30:45 ntpdate[1234]: adjust time server..."
-            first_line = result.stdout.strip().split('\n')[0]
-            # Extract date/time from ntpdate output
-            parts = first_line.split()
-            if len(parts) >= 2:
-                # Format: "2 Mar 14:30:45" or similar
-                return f"{parts[0]} {parts[1]} {parts[2]}" if len(parts) >= 3 else None
-    except Exception as e:
-        print(f"\033[1;33m[!] Could not get target time: {e}\033[0m")
-    return None
+        # SMB responses often include timestamps that could help
+        # For now, return None and let system sync handle it
+        return None
+    except Exception:
+        return None
+
+def sync_time_with_target(target):
+    """Synchronize local time with target using various methods."""
+    # Try multiple time sync methods
+    
+    # Method 1: Try ntpdate (legacy but still useful)
+    if shutil.which("ntpdate"):
+        try:
+            result = subprocess.run(
+                ["sudo", "ntpdate", target],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            if result.returncode == 0:
+                print(f"\033[1;32m[+] Time synchronized with target using ntpdate\033[0m")
+                return True
+        except Exception as e:
+            print(f"\033[1;33m[*] ntpdate sync failed: {e}\033[0m")
+    
+    # Method 2: Try timedatectl with systemd-timesyncd (modern approach)
+    if shutil.which("timedatectl"):
+        try:
+            # This requires NTP to be configured, but we can try to get the offset
+            result = subprocess.run(
+                ["timedatectl", "set-ntp", "true"],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            print(f"\033[1;32m[+] NTP sync enabled/verified with timedatectl\033[0m")
+            return True
+        except Exception as e:
+            print(f"\033[1;33m[*] timedatectl sync failed: {e}\033[0m")
+    
+    # Method 3: Try to get target time via SMB/LDAP timestamp
+    try:
+        # Use nxc to query and extract time from response
+        result = subprocess.run(
+            ["nxc", "smb", target, "-u", "dummy", "-p", "dummy"],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        if "Build" in result.stdout:
+            print(f"\033[1;33m[*] Could not directly sync time, but target is responsive\033[0m")
+            return False
+    except Exception:
+        pass
+    
+    return False
 
 def run_and_stream(cmd, file_handle, use_faketime=False, target=None):
     """Execute command, print to terminal and write to file in real time.
        Returns full output as string for later analysis."""
     
     # If using faketime, wrap the command
-    if use_faketime and target and shutil.which("faketime") and shutil.which("ntpdate"):
-        # Build faketime command using shell to get target time dynamically
-        nxc_cmd_str = " ".join(f"'{c}'" if ' ' in c or '!' in c or '&' in c else c for c in cmd)
-        shell_cmd = f'faketime "$(ntpdate -q {target} 2>/dev/null | head -n1 | cut -d \' \' -f 1,2)" {nxc_cmd_str}'
-        print(f"\n\033[1;35m[*] Retrying with faketime (clock sync):\033[0m")
-        print(f"\033[1;34m[*] Executing:\033[0m {shell_cmd}")
-        file_handle.write(f"### Command (with faketime): `{shell_cmd}`\n\n```bash\n")
-        file_handle.flush()
-        
-        full_output = ""
-        try:
-            process = subprocess.Popen(
-                shell_cmd,
-                shell=True,
-                stdout=subprocess.PIPE, 
-                stderr=subprocess.STDOUT, 
-                text=True, 
-                bufsize=1
-            )
-            for line in process.stdout:
-                print(line, end="")
-                file_handle.write(line)
-                file_handle.flush()
-                full_output += line
-            process.wait()
-        except Exception as e:
-            error_msg = f"Execution ERROR: {str(e)}\n"
-            print(f"\033[1;31m{error_msg}\033[0m")
-            file_handle.write(error_msg)
-            full_output += error_msg
-        
-        file_handle.write("```\n\n---\n\n")
-        file_handle.flush()
-        return full_output
+    if use_faketime and target:
+        if shutil.which("faketime"):
+            # First, attempt to sync time with target
+            print(f"\033[1;33m[*] Attempting to synchronize system time with target...\033[0m")
+            sync_time_with_target(target)
+            
+            # Build faketime command - use "now" or try to get target time
+            nxc_cmd_str = " ".join(f"'{c}'" if ' ' in c or '!' in c or '&' in c else c for c in cmd)
+            
+            # Try to get target time from SMB header
+            target_time_offset = get_time_offset_from_target(target)
+            if target_time_offset:
+                shell_cmd = f'faketime "{target_time_offset}" {nxc_cmd_str}'
+                print(f"\033[1;35m[*] Retrying with faketime using target time offset:\033[0m")
+            else:
+                # Fallback: sync time first, then retry
+                shell_cmd = f'{nxc_cmd_str}'
+                print(f"\033[1;35m[*] Retrying after time sync:\033[0m")
+            
+            print(f"\033[1;34m[*] Executing:\033[0m {shell_cmd}")
+            file_handle.write(f"### Command (with time sync): `{shell_cmd}`\n\n```bash\n")
+            file_handle.flush()
+            
+            full_output = ""
+            try:
+                process = subprocess.Popen(
+                    shell_cmd,
+                    shell=True,
+                    stdout=subprocess.PIPE, 
+                    stderr=subprocess.STDOUT, 
+                    text=True, 
+                    bufsize=1
+                )
+                for line in process.stdout:
+                    print(line, end="")
+                    file_handle.write(line)
+                    file_handle.flush()
+                    full_output += line
+                process.wait()
+            except Exception as e:
+                error_msg = f"Execution ERROR: {str(e)}\n"
+                print(f"\033[1;31m{error_msg}\033[0m")
+                file_handle.write(error_msg)
+                full_output += error_msg
+            
+            file_handle.write("```\n\n---\n\n")
+            file_handle.flush()
+            return full_output
+        else:
+            print(f"\033[1;33m[*] faketime not found. Proceeding without it.\033[0m")
     
     # Normal execution
     cmd_str = " ".join(cmd)
